@@ -30,7 +30,7 @@ GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY"))
 HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
 
 # (Usamos la URL /models/ que arreglamos en v4.2)
-API_URL_E5 = "https://api-inference.huggingface.co/models/intfloat/multilingual-e5-large-instruct"
+API_URL_E5 = "https://router.huggingface.co/hf-inference/models/intfloat/multilingual-e5-large-instruct"
 HEADERS_E5 = {"Authorization": f"Bearer {HF_TOKEN}"}
 
 # --- 2. CLIENTES Y MODELOS (@st.cache_resource) ---
