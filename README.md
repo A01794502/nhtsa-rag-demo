@@ -108,11 +108,11 @@ El sistema mantiene una cobertura semántica excelente y un rendimiento en tiemp
 ## 🧩 Visualización
 
 <p align="center">
-  <img src="docs/fig_agent_ui.png" width="80%">
+  <img src="docs/agente.jpg" width="80%">
 </p>
 
 <p align="center">
-  <img src="docs/fig_agent_result.png" width="80%">
+  <img src="docs/response.jpg" width="80%">
 </p>
 
 ---
