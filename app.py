@@ -66,9 +66,12 @@ def get_llm():
     """Carga el LLM de Groq (una sola vez)."""
     if not GROQ_API_KEY:
         raise ValueError("GROQ_API_KEY no está configurada en st.secrets")
-    # Usamos Llama 3.1 70b, es rápido y potente
+    
+    # --- AQUÍ ESTÁ EL CAMBIO ---
+    # El modelo 'llama-3.1-70b-versatile' fue descontinuado.
+    # Lo reemplazamos por el modelo estándar Llama 3 70B (8k de contexto).
     return ChatGroq(
-        model="llama-3.1-70b-versatile",
+        model="llama3-70b-8192",  # <-- ¡ESTA LÍNEA ES LA CORRECCIÓN!
         api_key=GROQ_API_KEY,
         temperature=0.1,  # Baja temperatura para análisis factual
         max_tokens=2048,
