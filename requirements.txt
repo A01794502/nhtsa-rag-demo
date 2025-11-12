@@ -3,8 +3,6 @@
 streamlit
 neo4j
 qdrant-client
-sentence-transformers
-torch
 numpy
 joblib
 langchain
