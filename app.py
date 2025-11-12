@@ -396,10 +396,15 @@ def build_component_graph(component_strings_list: List[str]) -> Optional[str]:
     return str(dot) # Devuelve el string DOT
 
 # --- 7. APLICACIÓN STREAMLIT (UI HÍBRIDA MEJORADA) ---
-st.set_page_config(page_title="Agente NHTSA RAG", layout="wide")
-st.title("🚗 Agente Híbrido de Búsqueda NHTSA")
 st.markdown("""
-... (descripción sin cambios) ...
+Este demo implementa un **Agente de RAG Híbrido** que combina búsqueda vectorial, grafos de conocimiento y un LLM.
+
+**Pipeline de Análisis:**
+1.  **Filtro de Entidad:** Utiliza Make, Model y Year para filtrar la búsqueda.
+2.  **Flujo 1 (Grafo "Golden"):** Busca quejas similares (Qdrant) y atraviesa el grafo de Neo4j (`[:ASSOCIATED_RECALL]`) para encontrar recalls *directamente vinculados* al vehículo.
+3.  **Flujo 2 (Semántico "Fallback"):** Si el Flujo 1 no encuentra vínculos de texto, realiza una búsqueda vectorial *filtrada* en todo el corpus de Recalls e Investigaciones (Qdrant).
+4.  **Agente (LLM):** Un LLM de Groq (Llama 3) analiza el contexto recuperado y genera un resumen experto.
+5.  **Visualización (Causa Raíz):** Un grafo (Graphviz) renderiza la jerarquía de los componentes afectados (`[:SUB_OF]`) para un diagnóstico visual inmediato.
 """)
 
 st.subheader("Información del Vehículo (Opcional, pero recomendado)")
