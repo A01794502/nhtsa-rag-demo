@@ -396,6 +396,8 @@ def build_component_graph(component_strings_list: List[str]) -> Optional[str]:
     return str(dot) # Devuelve el string DOT
 
 # --- 7. APLICACIÓN STREAMLIT (UI HÍBRIDA MEJORADA) ---
+st.set_page_config(page_title="Agente NHTSA RAG", layout="wide")
+st.title("🚗 Agente Híbrido de Búsqueda NHTSA")
 st.markdown("""
 Este demo implementa un **Agente de RAG Híbrido** que combina búsqueda vectorial, grafos de conocimiento y un LLM.
 
