@@ -1,21 +1,21 @@
 # ===============================================
-#          app.py (Híbrido FINAL v3 - Lógica Corregida)
+#          app.py (Híbrido FINAL v4 - API de HF)
 # ===============================================
 # CAMBIOS:
-# 1. run_golden_flow: QUITA el filtro mmy de qdrant_search(complaints)
-# 2. run_golden_flow: AÑADE el filtro mmy a la consulta Cypher
-# 3. run_semantic_flow: MANTIENE el filtro mmy (ahora funcionará)
+# 1. Se eliminó 'torch' y 'sentence-transformers'.
+# 2. Se eliminó 'get_encoder()'.
+# 3. 'e5_query()' ahora usa la API de Hugging Face.
+# 4. Se añadió 'HF_TOKEN' a los secrets.
 # ===============================================
 
 import streamlit as st
 import os
 import numpy as np
 import json
+import requests  # Para llamar a la API
+import time      # Para los reintentos
 from neo4j import GraphDatabase
 from qdrant_client import QdrantClient, models
-from sentence_transformers import SentenceTransformer
-import torch
-import joblib
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -28,7 +28,13 @@ NEO4J_PASS = st.secrets.get("NEO4J_PASS", os.getenv("NEO4J_PASS"))
 QDRANT_URL = st.secrets.get("QDRANT_URL", os.getenv("QDRANT_URL"))
 QDRANT_KEY = st.secrets.get("QDRANT_KEY", os.getenv("QDRANT_KEY"))
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY"))
-E5_MODEL_NAME = "intfloat/multilingual-e5-large-instruct"
+
+# ¡NUEVA CLAVE!
+HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
+
+# Endpoint de la API gratuita de Hugging Face
+API_URL_E5 = "https://api-inference.huggingface.co/pipeline/feature-extraction/intfloat/multilingual-e5-large-instruct"
+HEADERS_E5 = {"Authorization": f"Bearer {HF_TOKEN}"}
 
 # --- 2. CLIENTES Y MODELOS (@st.cache_resource) ---
 @st.cache_resource
@@ -44,43 +50,60 @@ def get_qdrant_client():
     print("Conectado a Qdrant.")
     return client
 
-@st.cache_resource
-def get_encoder():
-    print(f"Cargando modelo E5: {E5_MODEL_NAME}...")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    encoder = SentenceTransformer(E5_MODEL_NAME, device=device)
-    if torch.cuda.is_available():
-        try:
-            encoder._first_module().auto_model.to(dtype=torch.float16)
-        except Exception:
-            pass
-    encoder.max_seq_length = 256
-    print("Modelo E5 cargado.")
-    return encoder
+# ¡YA NO NECESITAMOS get_encoder()!
 
 @st.cache_resource
 def get_llm():
     if not GROQ_API_KEY:
         raise ValueError("GROQ_API_KEY no está configurada en st.secrets")
     return ChatGroq(
-        model="llama-3.3-70b-versatile",
+        model="llama3-70b-8192",
         api_key=GROQ_API_KEY,
         temperature=0.1,
         max_tokens=2048,
     )
 
 # --- 3. FUNCIONES DE BÚSQUEDA (Comunes) ---
-@torch.no_grad()
+
+# ¡FUNCIÓN ACTUALIZADA!
+@st.cache_data  # Cacheamos la *salida* de esta función
 def e5_query(text: str) -> np.ndarray:
-    enc = get_encoder()
-    vec = enc.encode(
-        [f"query: {text}"],
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-        batch_size=4,
-        show_progress_bar=False
-    )[0]
-    return np.asarray(vec, dtype=np.float32)
+    """
+    Llama a la API de Hugging Face para obtener el vector.
+    Ya no carga el modelo en la RAM de Streamlit.
+    """
+    if not HF_TOKEN:
+        raise ValueError("HF_TOKEN no fue encontrado en st.secrets.")
+
+    payload = {
+        "inputs": f"query: {text}",
+        "options": {"wait_for_model": True} # Importante si el modelo está "frío"
+    }
+
+    # Reintentar 3 veces si el modelo está cargando (503)
+    for i in range(3):
+        response = requests.post(API_URL_E5, headers=HEADERS_E5, json=payload)
+        
+        if response.status_code == 200:
+            vector = response.json()
+            if isinstance(vector, list) and len(vector) > 0:
+                # La API devuelve [[vector]], así que tomamos el primer elemento
+                return np.asarray(vector[0], dtype=np.float32)
+            else:
+                raise ValueError(f"Hugging Face API payload inesperado: {vector}")
+
+        elif response.status_code == 503: # Modelo está cargando
+            print(f"Modelo E5 está cargando (intento {i+1}/3), reintentando en 5s...")
+            time.sleep(5)
+        else:
+            # Otro error (ej. 401 Unauthorized si el token es malo)
+            raise RuntimeError(
+                f"Error en API de Hugging Face: {response.status_code}\n"
+                f"Respuesta: {response.text}"
+            )
+    
+    raise RuntimeError("Falló la obtención del vector de Hugging Face después de 3 reintentos.")
+
 
 def cypher(query: str, params: Optional[Dict[str, Any]] = None):
     with get_neo_driver().session() as s:
@@ -160,21 +183,13 @@ def qdrant_retrieve_by_ids(ids: list, collection_name: str) -> dict:
     return text_map
 
 # --- 4. PIPELINE DE DATOS - FLUJO 1 (GOLDEN) ---
-def run_golden_flow(question: str, mmy_filter: Optional[Dict[str, Any]] = None, k: int = 25): # Aumentamos K a 25
-    """
-    Ejecuta el pipeline RAG Híbrido:
-    1. Qdrant(Complaints) -> (semántico puro) -> comp_id
-    2. Neo4j(comp_id) -> [:ASSOCIATED_RECALL] -> (filtro MMY) -> recall_id
-    3. Qdrant(Recalls) -> full_text
-    """
+def run_golden_flow(question: str, mmy_filter: Optional[Dict[str, Any]] = None, k: int = 25):
     try:
         qv = e5_query(question)
     except Exception as e:
         return {"error": f"Falla al codificar texto: {e}"}
 
     try:
-        # ¡CAMBIO! Quitamos el filtro mmy_filter de esta búsqueda.
-        # Buscamos más (k=25) para tener más candidatos para Neo4j.
         hits = qdrant_search(qv, k=k, collection="nhtsa_complaints")
     except Exception as e:
         return {"error": f"Falla en búsqueda de Qdrant(Complaints): {e}"}
@@ -183,30 +198,20 @@ def run_golden_flow(question: str, mmy_filter: Optional[Dict[str, Any]] = None, 
     if not ids:
         return {"query": question, "hits": hits, "results": []}
 
-    # PASO 2: Neo4j (Obtener IDs de Recall Y APLICAR FILTRO MMY)
-    
-    # Preparamos los parámetros del filtro para Cypher
     cypher_params = {
         "ids": ids,
-        "make": mmy_filter.get("make"),   # Será None si no se proveyó
-        "model": mmy_filter.get("model"), # Será None si no se proveyó
-        "year": mmy_filter.get("year")    # Será None si no se proveyó
+        "make": mmy_filter.get("make"),
+        "model": mmy_filter.get("model"),
+        "year": mmy_filter.get("year")
     }
 
-    # ¡CAMBIO! Añadimos la cláusula WHERE para filtrar en Neo4j
     query = """
     UNWIND $ids AS cid
     MATCH (c:Complaint {comp_id: cid})
     MATCH (c)-[rel:ASSOCIATED_RECALL]->(r:Recall)
-    
-    // ¡AQUÍ ESTÁ EL FILTRO!
-    // Si $make es nulo, la condición (r.make = $make) es falsa,
-    // así que ($make IS NULL OR r.make = $make) se vuelve (TRUE OR FALSE) = TRUE.
-    // Si $make es "TOYOTA", se vuelve (FALSE OR r.make = "TOYOTA") = r.make = "TOYOTA".
     WHERE ($make IS NULL OR r.make = $make)
       AND ($model IS NULL OR r.model = $model)
       AND ($year IS NULL OR r.year = $year)
-      
     RETURN 
       c.comp_id AS complaint_comp_id,
       r.id AS recall_id,
@@ -218,14 +223,11 @@ def run_golden_flow(question: str, mmy_filter: Optional[Dict[str, Any]] = None, 
     neo4j_details = cypher(query, cypher_params)
     
     if not neo4j_details:
-         # Esto ahora significa: "No se encontraron recalls *que coincidan con tu filtro*"
          return {"query": question, "hits": hits, "results": []}
 
-    # PASO 3: OBTENER TEXTO COMPLETO DE QDRANT(RECALLS)
     recall_ids_encontrados = list(set(r['recall_id'] for r in neo4j_details if r['recall_id']))
     mapa_texto_completo = qdrant_retrieve_by_ids(recall_ids_encontrados, "nhtsa_recalls")
     
-    # PASO 4: Unir todo y CLASIFICAR
     results_by_complaint = {}
     for hit in hits:
         p = hit.get("payload", {})
@@ -259,14 +261,12 @@ def run_golden_flow(question: str, mmy_filter: Optional[Dict[str, Any]] = None, 
 
 # --- 5. PIPELINE DE DATOS - FLUJO 2 (SEMÁNTICO) ---
 def run_semantic_flow(question: str, mmy_filter: Optional[Dict[str, Any]] = None, k: int = 5):
-    """Ejecuta una búsqueda semántica directa con filtros MMY."""
     try:
         qv = e5_query(question)
     except Exception as e:
         return {"error": f"Falla al codificar texto: {e}"}
 
     try:
-        # Esta búsqueda SÍ usa el filtro, porque 'nhtsa_recalls' tiene los campos
         recall_hits = qdrant_search(qv, k=k, mmy_filter=mmy_filter, collection="nhtsa_recalls")
         investigation_hits = qdrant_search(qv, k=k, mmy_filter=mmy_filter, collection="nhtsa_investigations")
     except Exception as e:
@@ -380,7 +380,6 @@ Este demo implementa un pipeline **Híbrido (Grafo + Semántico)** con **Filtros
 3.  **Agente:** Un LLM (Groq/Llama 3) analiza y resume los hallazgos.
 """)
 
-# --- NUEVOS CAMPOS DE ENTRADA ---
 st.subheader("Información del Vehículo (Opcional, pero recomendado)")
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -402,18 +401,15 @@ if st.button("Analizar Falla", type="primary"):
         st.error("Por favor, introduce una descripción de la falla.")
     else:
         try:
-            # --- CONSTRUIR EL FILTRO MMY ---
             mmy_filter = {}
             if make: mmy_filter["make"] = make.upper().strip()
             if model: mmy_filter["model"] = model.upper().strip()
             if year: mmy_filter["year"] = int(year)
             
-            # --- LÓGICA HÍBRIDA PRINCIPAL ---
             rag_results = None
             llm_prompt = None
             context_str = None
             
-            # --- INTENTO 1: FLUJO GOLDEN (Grafo) ---
             with st.spinner("Paso 1/3: Buscando vínculos en el Grafo (Flujo 1)..."):
                 golden_results = run_golden_flow(user_query, mmy_filter=mmy_filter)
             
@@ -432,7 +428,6 @@ if st.button("Analizar Falla", type="primary"):
                 context_str = format_golden_context(rag_results)
             
             else:
-                # --- INTENTO 2: FLUJO SEMÁNTICO (Fallback) ---
                 st.warning("Paso 1: No se encontraron recalls *con texto* en el grafo.")
                 st.info("Ejecutando Paso 1.5: Búsqueda semántica directa (Flujo 2)...")
                 
@@ -447,7 +442,6 @@ if st.button("Analizar Falla", type="primary"):
                 llm_prompt = SEMANTIC_FLOW_PROMPT
                 context_str = format_semantic_context(rag_results)
 
-            # --- PASO FINAL: LLAMAR AL LLM ---
             st.success("Paso 2/3: Datos recuperados. Pasando al LLM de Groq para análisis...")
             
             with st.chat_message("assistant"):
