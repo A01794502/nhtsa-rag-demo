@@ -1,0 +1,12 @@
+# Pega esto en un archivo llamado requirements.txt
+
+streamlit
+neo4j
+qdrant-client
+sentence-transformers
+torch
+numpy
+joblib
+langchain
+langchain-core
+langchain-groq
