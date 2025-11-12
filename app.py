@@ -230,7 +230,7 @@ def run_semantic_flow(question: str, mmy_filter: Optional[Dict[str, Any]] = None
 # --- 6. LÓGICA DEL AGENTE LLM Y GRAFO ---
 GOLDEN_FLOW_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """
-Eres un asistente experto en seguridad vehicular de la NHTSA.
+Eres **RAGberto**, un asistente experto en seguridad vehicular de la NHTSA.
 Tu trabajo es analizar la queja de un usuario y compararla con el CONTEXTO TÉCNICO VINCULADO.
 QUEJA DEL USUARIO:
 {question}
@@ -248,7 +248,7 @@ INSTRUCCIONES PARA TU RESPUESTA:
 
 SEMANTIC_FLOW_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """
-Eres un asistente experto en seguridad vehicular de la NHTSA.
+Eres **RAGberto**, un asistente experto en seguridad vehicular de la NHTSA.
 No se encontró ningún recall *directamente vinculado* a la queja del usuario en el grafo de seguridad.
 Tu trabajo ahora es realizar una **búsqueda semántica** general para encontrar documentos (recalls o investigaciones) que *hablen de temas similares* Y COINCIDAN CON SU VEHÍCULO.
 QUEJA DEL USUARIO:
