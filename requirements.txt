@@ -1,10 +1,8 @@
-# Pega esto en un archivo llamado requirements.txt
-
 streamlit
 neo4j
 qdrant-client
 numpy
-joblib
 langchain
 langchain-core
 langchain-groq
+graphviz
