@@ -1,10 +1,12 @@
 # ===============================================
-#          app.py (Híbrido FINAL v4.3 - Arreglo de Tipo de Vector)
+#          app.py (Híbrido FINAL v4.5 - Stateless LLM)
 # ===============================================
 # CAMBIOS:
-# 1. 'e5_query()' ahora es mucho más robusta. Valida que la API
-#    devuelva un vector 1D, arreglando el error '<class 'float'>'.
-# 2. Corregido un typo: 'actionacalls' -> 'actionable_recalls'.
+# 1. Se quitó @st.cache_resource de get_llm() para
+#    prevenir alucinaciones (contaminación de contexto).
+# 2. Se corrigió la URL de la API de HF (Error 404).
+# 3. Se corrigió el nombre del modelo Groq (Error 400).
+# 4. Se corrigió el typo 'actionacalls'.
 # ===============================================
 
 import streamlit as st
@@ -29,8 +31,8 @@ QDRANT_KEY = st.secrets.get("QDRANT_KEY", os.getenv("QDRANT_KEY"))
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY"))
 HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
 
-# (Usamos la URL /models/ que arreglamos en v4.2)
-API_URL_E5 = "https://router.huggingface.co/hf-inference/models/intfloat/multilingual-e5-large-instruct"
+# ¡URL CORREGIDA! (Arregla el error 404)
+API_URL_E5 = "https://api-inference.huggingface.co/models/intfloat/multilingual-e5-large-instruct"
 HEADERS_E5 = {"Authorization": f"Bearer {HF_TOKEN}"}
 
 # --- 2. CLIENTES Y MODELOS (@st.cache_resource) ---
@@ -47,27 +49,32 @@ def get_qdrant_client():
     print("Conectado a Qdrant.")
     return client
 
-@st.cache_resource
+# ===============================================================
+# ¡CAMBIO IMPORTANTE!
+# Quitamos @st.cache_resource de get_llm() para hacerlo "stateless"
+# y prevenir la contaminación de contexto (alucinaciones).
+# ===============================================================
 def get_llm():
+    """
+    Carga el LLM de Groq.
+    Lo llamamos CADA VEZ para asegurar que sea 'stateless'.
+    """
     if not GROQ_API_KEY:
         raise ValueError("GROQ_API_KEY no está configurada en st.secrets")
+    
+    print("Creando NUEVA instancia de ChatGroq (stateless)...")
     return ChatGroq(
-        model="llama-3.3-70b-versatile",
+        model="llama3-70b-8192",  # ¡MODELO CORREGIDO! (Arregla error 400)
         api_key=GROQ_API_KEY,
         temperature=0.1,
         max_tokens=2048,
     )
 
 # --- 3. FUNCIONES DE BÚSQUEDA (Comunes) ---
-
-# ===============================================================
-# ¡FUNCIÓN e5_query() ACTUALIZADA Y ROBUSTA!
-# ===============================================================
 @st.cache_data
 def e5_query(text: str) -> np.ndarray:
     """
     Llama a la API de Hugging Face para obtener el vector.
-    Ahora valida la forma (shape) de la respuesta.
     """
     if not HF_TOKEN:
         raise ValueError("HF_TOKEN no fue encontrado en st.secrets.")
@@ -82,30 +89,19 @@ def e5_query(text: str) -> np.ndarray:
         
         if response.status_code == 200:
             vector_data = response.json()
-            
-            # --- INICIO DE LA NUEVA LÓGICA DE VALIDACIÓN ---
-            
-            # Forzar la data a ser un np.array
             v = np.asarray(vector_data, dtype=np.float32)
             
-            # Caso 1: La API devuelve [[1.0, 2.0, ...]] (un vector anidado)
-            # v.shape será (1, 1024)
             if v.ndim == 2 and v.shape[0] == 1:
-                v = v.flatten() # Lo convertimos a 1D -> (1024,)
+                v = v.flatten() 
             
-            # Caso 2: La API devuelve [1.0, 2.0, ...] (un vector plano)
-            # v.shape será (1024,)
             if v.ndim == 1 and v.shape[0] > 1:
-                return v # Esta es la respuesta correcta
+                return v 
 
-            # Caso 3 (EL ERROR): La API devuelve un float, o [float], o [[float]]
-            # v.shape será (0,) o (1,)
             raise ValueError(
                 f"Hugging Face API payload inesperado. "
                 f"Se esperaba un vector 1D de 1024 dims, pero se recibió forma {v.shape}. "
                 f"Respuesta JSON: {vector_data}"
             )
-            # --- FIN DE LA NUEVA LÓGICA ---
 
         elif response.status_code == 503: 
             print(f"Modelo E5 está cargando (intento {i+1}/3), reintentando en 5s...")
@@ -139,12 +135,12 @@ def qdrant_search(qv, k=15, mmy_filter=None, collection=None):
         if conditions:
             qdrant_filter = models.Filter(must=conditions)
     
-    qv_list = qv.tolist() # Si qv no es un vector 1D, esto falla.
+    qv_list = qv.tolist() 
     
     try:
         resp = client.query_points(
             collection_name=collection,
-            query=qv_list, # qv_list debe ser [1.0, 2.0, ...]
+            query=qv_list, 
             limit=k,
             with_payload=True,
             with_vectors=False,
@@ -219,6 +215,7 @@ def run_golden_flow(question: str, mmy_filter: Optional[Dict[str, Any]] = None, 
         "year": mmy_filter.get("year")
     }
 
+    # ¡CYPHER CORREGIDO! (Para el prompt inteligente)
     query = """
     UNWIND $ids AS cid
     MATCH (c:Complaint {comp_id: cid})
@@ -231,7 +228,10 @@ def run_golden_flow(question: str, mmy_filter: Optional[Dict[str, Any]] = None, 
       r.id AS recall_id,
       r.subject AS recall_summary,
       r.consequence AS recall_consequence,
-      r.component AS recall_component_text
+      r.component AS recall_component_text,
+      r.make AS recall_make,
+      r.model AS recall_model,
+      r.year AS recall_year
     ORDER BY c.comp_id
     """
     neo4j_details = cypher(query, cypher_params)
@@ -279,13 +279,11 @@ def run_semantic_flow(question: str, mmy_filter: Optional[Dict[str, Any]] = None
         qv = e5_query(question)
     except Exception as e:
         return {"error": f"Falla al codificar texto: {e}"}
-
     try:
         recall_hits = qdrant_search(qv, k=k, mmy_filter=mmy_filter, collection="nhtsa_recalls")
         investigation_hits = qdrant_search(qv, k=k, mmy_filter=mmy_filter, collection="nhtsa_investigations")
     except Exception as e:
         return {"error": f"Falla en búsqueda de Qdrant: {e}"}
-
     return {
         "query": question,
         "recall_hits": recall_hits,
@@ -334,9 +332,8 @@ INSTRUCCIONES PARA TU RESPUESTA:
 """)
 ])
 
-# ===============================================================
 # ¡TYPO CORREGIDO! ('actionacalls' -> 'actionable_recalls')
-# ===============================================================
+# ¡LÓGICA CORREGIDA! (Para el prompt inteligente)
 def format_golden_context(rag_results: dict) -> str:
     if not rag_results.get("results"):
         return "No se encontraron quejas similares ni recalls asociados en la base de datos."
@@ -347,9 +344,8 @@ def format_golden_context(rag_results: dict) -> str:
         context_parts.append(f"\n--- ANÁLISIS DEL HIT DE QUEJA #{i} (ID: {comp_id}, Similitud: {score:.2f}) ---")
         if res['actionable_recalls']:
             context_parts.append("\n**RECALLS ACCIONABLES (Con texto completo):**")
-            for recall in res['actionable_recalls']:
+            for recall in res['actionable_recalls']: # <-- TYPO CORREGIDO
                 context_parts.append(f"  - ID Recall: {recall['recall_id']}")
-                # ¡Añadimos Make/Model/Year al contexto!
                 context_parts.append(f"    Vehículo del Recall: {recall.get('recall_make')} {recall.get('recall_model')} {recall.get('recall_year')}") 
                 context_parts.append(f"    Defecto (Resumen): {recall['recall_summary']}")
                 context_parts.append(f"    Riesgo (Consecuencia): {recall['recall_consequence']}")
@@ -379,7 +375,7 @@ def format_semantic_context(rag_results: dict) -> str:
     return "\n".join(context_parts)
 
 def get_llm_summary(user_query: str, prompt_template: ChatPromptTemplate, context_str: str):
-    llm = get_llm()
+    llm = get_llm() # Llama al factory CADA VEZ
     chain = prompt_template | llm | StrOutputParser()
     return chain.stream({
         "context": context_str,
