@@ -296,11 +296,7 @@ def run_semantic_flow(question: str, mmy_filter: Optional[Dict[str, Any]] = None
 GOLDEN_FLOW_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """
 Eres un asistente experto en seguridad vehicular de la NHTSA.
-Tu trabajo es analizar la queja de un usuario y compararla con el CONTEXTO TÉCNICO VINCULADO (basado en un grafo).
-
-El contexto se divide en dos partes:
-1.  **RECALLS ACCIONABLES:** Estos son recalls con texto completo que están *directamente vinculados* a quejas similares a la del usuario Y COINCIDEN CON SU VEHÍCULO.
-2.  **VÍNCULOS HISTÓRICOS:** Estos son IDs de recalls más antiguos que también están *vinculados* a esta queja.
+Tu trabajo es analizar la queja de un usuario y compararla con el CONTEXTO TÉCNICO VINCULADO.
 
 QUEJA DEL USUARIO:
 {question}
@@ -309,9 +305,12 @@ CONTEXTO TÉCNICO RECUPERADO (VÍA GRAFO):
 {context}
 
 INSTRUCCIONES PARA TU RESPUESTA:
-1.  **Analiza** los "RECALLS ACCIONABLES". Resume los hallazgos más relevantes.
-2.  **Menciona** los "VÍNCULOS HISTÓRICOS" si existen.
-3.  **Concluye** con un resumen profesional. Responde en español. Si el contexto está vacío, dilo.
+1.  **Analiza** la "QUEJA DEL USUARIO" para identificar el vehículo (Make, Model, Year).
+2.  **Revisa** los "RECALLS ACCIONABLES". Compara cada recall con el vehículo del usuario.
+3.  **Resume ÚNICAMENTE** los recalls que sean *altamente relevantes* para el vehículo y el problema del usuario.
+4.  **Si NINGÚN recall accionable es relevante** (ej. son de marcas o modelos diferentes), debes informarlo. Di: "No se encontraron recalls vinculados que coincidan con su vehículo. Los recalls encontrados (IDs: [...]) se refieren a otros modelos."
+5.  **Menciona** los "VÍNCULOS HISTÓRICOS" si existen, como evidencia de patrones.
+6.  **Concluye** con un resumen profesional. Responde en español.
 """)
 ])
 
@@ -348,9 +347,10 @@ def format_golden_context(rag_results: dict) -> str:
         context_parts.append(f"\n--- ANÁLISIS DEL HIT DE QUEJA #{i} (ID: {comp_id}, Similitud: {score:.2f}) ---")
         if res['actionable_recalls']:
             context_parts.append("\n**RECALLS ACCIONABLES (Con texto completo):**")
-            # --- ¡TYPO CORREGIDO AQUÍ! ---
-            for recall in res['actionable_recalls']: 
+            for recall in res['actionable_recalls']:
                 context_parts.append(f"  - ID Recall: {recall['recall_id']}")
+                # ¡Añadimos Make/Model/Year al contexto!
+                context_parts.append(f"    Vehículo del Recall: {recall.get('recall_make')} {recall.get('recall_model')} {recall.get('recall_year')}") 
                 context_parts.append(f"    Defecto (Resumen): {recall['recall_summary']}")
                 context_parts.append(f"    Riesgo (Consecuencia): {recall['recall_consequence']}")
                 context_parts.append(f"    Texto Completo: {recall['full_text_from_qdrant'][:500]}...")
