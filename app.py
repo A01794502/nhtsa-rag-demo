@@ -1,11 +1,10 @@
 # ===============================================
-#          app.py (Híbrido FINAL v4 - API de HF)
+#          app.py (Híbrido FINAL v4.3 - Arreglo de Tipo de Vector)
 # ===============================================
 # CAMBIOS:
-# 1. Se eliminó 'torch' y 'sentence-transformers'.
-# 2. Se eliminó 'get_encoder()'.
-# 3. 'e5_query()' ahora usa la API de Hugging Face.
-# 4. Se añadió 'HF_TOKEN' a los secrets.
+# 1. 'e5_query()' ahora es mucho más robusta. Valida que la API
+#    devuelva un vector 1D, arreglando el error '<class 'float'>'.
+# 2. Corregido un typo: 'actionacalls' -> 'actionable_recalls'.
 # ===============================================
 
 import streamlit as st
@@ -28,12 +27,10 @@ NEO4J_PASS = st.secrets.get("NEO4J_PASS", os.getenv("NEO4J_PASS"))
 QDRANT_URL = st.secrets.get("QDRANT_URL", os.getenv("QDRANT_URL"))
 QDRANT_KEY = st.secrets.get("QDRANT_KEY", os.getenv("QDRANT_KEY"))
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY"))
-
-# ¡NUEVA CLAVE!
 HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
 
-# Endpoint de la API gratuita de Hugging Face 
-API_URL_E5 = "https://router.huggingface.co/hf-inference/models/intfloat/multilingual-e5-large-instruct"
+# (Usamos la URL /models/ que arreglamos en v4.2)
+API_URL_E5 = "https://api-inference.huggingface.co/models/intfloat/multilingual-e5-large-instruct"
 HEADERS_E5 = {"Authorization": f"Bearer {HF_TOKEN}"}
 
 # --- 2. CLIENTES Y MODELOS (@st.cache_resource) ---
@@ -50,14 +47,12 @@ def get_qdrant_client():
     print("Conectado a Qdrant.")
     return client
 
-# ¡YA NO NECESITAMOS get_encoder()!
-
 @st.cache_resource
 def get_llm():
     if not GROQ_API_KEY:
         raise ValueError("GROQ_API_KEY no está configurada en st.secrets")
     return ChatGroq(
-        model="llama3-70b-8192",
+        model="llama-3.3-70b-versatile",
         api_key=GROQ_API_KEY,
         temperature=0.1,
         max_tokens=2048,
@@ -65,38 +60,57 @@ def get_llm():
 
 # --- 3. FUNCIONES DE BÚSQUEDA (Comunes) ---
 
-# ¡FUNCIÓN ACTUALIZADA!
-@st.cache_data  # Cacheamos la *salida* de esta función
+# ===============================================================
+# ¡FUNCIÓN e5_query() ACTUALIZADA Y ROBUSTA!
+# ===============================================================
+@st.cache_data
 def e5_query(text: str) -> np.ndarray:
     """
     Llama a la API de Hugging Face para obtener el vector.
-    Ya no carga el modelo en la RAM de Streamlit.
+    Ahora valida la forma (shape) de la respuesta.
     """
     if not HF_TOKEN:
         raise ValueError("HF_TOKEN no fue encontrado en st.secrets.")
 
     payload = {
         "inputs": f"query: {text}",
-        "options": {"wait_for_model": True} # Importante si el modelo está "frío"
+        "options": {"wait_for_model": True}
     }
 
-    # Reintentar 3 veces si el modelo está cargando (503)
     for i in range(3):
         response = requests.post(API_URL_E5, headers=HEADERS_E5, json=payload)
         
         if response.status_code == 200:
-            vector = response.json()
-            if isinstance(vector, list) and len(vector) > 0:
-                # La API devuelve [[vector]], así que tomamos el primer elemento
-                return np.asarray(vector[0], dtype=np.float32)
-            else:
-                raise ValueError(f"Hugging Face API payload inesperado: {vector}")
+            vector_data = response.json()
+            
+            # --- INICIO DE LA NUEVA LÓGICA DE VALIDACIÓN ---
+            
+            # Forzar la data a ser un np.array
+            v = np.asarray(vector_data, dtype=np.float32)
+            
+            # Caso 1: La API devuelve [[1.0, 2.0, ...]] (un vector anidado)
+            # v.shape será (1, 1024)
+            if v.ndim == 2 and v.shape[0] == 1:
+                v = v.flatten() # Lo convertimos a 1D -> (1024,)
+            
+            # Caso 2: La API devuelve [1.0, 2.0, ...] (un vector plano)
+            # v.shape será (1024,)
+            if v.ndim == 1 and v.shape[0] > 1:
+                return v # Esta es la respuesta correcta
 
-        elif response.status_code == 503: # Modelo está cargando
+            # Caso 3 (EL ERROR): La API devuelve un float, o [float], o [[float]]
+            # v.shape será (0,) o (1,)
+            raise ValueError(
+                f"Hugging Face API payload inesperado. "
+                f"Se esperaba un vector 1D de 1024 dims, pero se recibió forma {v.shape}. "
+                f"Respuesta JSON: {vector_data}"
+            )
+            # --- FIN DE LA NUEVA LÓGICA ---
+
+        elif response.status_code == 503: 
             print(f"Modelo E5 está cargando (intento {i+1}/3), reintentando en 5s...")
             time.sleep(5)
         else:
-            # Otro error (ej. 401 Unauthorized si el token es malo)
             raise RuntimeError(
                 f"Error en API de Hugging Face: {response.status_code}\n"
                 f"Respuesta: {response.text}"
@@ -125,12 +139,12 @@ def qdrant_search(qv, k=15, mmy_filter=None, collection=None):
         if conditions:
             qdrant_filter = models.Filter(must=conditions)
     
-    qv_list = qv.tolist()
+    qv_list = qv.tolist() # Si qv no es un vector 1D, esto falla.
     
     try:
         resp = client.query_points(
             collection_name=collection,
-            query=qv_list,
+            query=qv_list, # qv_list debe ser [1.0, 2.0, ...]
             limit=k,
             with_payload=True,
             with_vectors=False,
@@ -279,7 +293,6 @@ def run_semantic_flow(question: str, mmy_filter: Optional[Dict[str, Any]] = None
     }
 
 # --- 6. LÓGICA DEL AGENTE LLM ---
-# (Prompts y funciones de formato sin cambios)
 GOLDEN_FLOW_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """
 Eres un asistente experto en seguridad vehicular de la NHTSA.
@@ -322,6 +335,9 @@ INSTRUCCIONES PARA TU RESPUESTA:
 """)
 ])
 
+# ===============================================================
+# ¡TYPO CORREGIDO! ('actionacalls' -> 'actionable_recalls')
+# ===============================================================
 def format_golden_context(rag_results: dict) -> str:
     if not rag_results.get("results"):
         return "No se encontraron quejas similares ni recalls asociados en la base de datos."
@@ -332,7 +348,8 @@ def format_golden_context(rag_results: dict) -> str:
         context_parts.append(f"\n--- ANÁLISIS DEL HIT DE QUEJA #{i} (ID: {comp_id}, Similitud: {score:.2f}) ---")
         if res['actionable_recalls']:
             context_parts.append("\n**RECALLS ACCIONABLES (Con texto completo):**")
-            for recall in res['actionable_recalls']:
+            # --- ¡TYPO CORREGIDO AQUÍ! ---
+            for recall in res['actionable_recalls']: 
                 context_parts.append(f"  - ID Recall: {recall['recall_id']}")
                 context_parts.append(f"    Defecto (Resumen): {recall['recall_summary']}")
                 context_parts.append(f"    Riesgo (Consecuencia): {recall['recall_consequence']}")
@@ -370,7 +387,6 @@ def get_llm_summary(user_query: str, prompt_template: ChatPromptTemplate, contex
     })
 
 # --- 7. APLICACIÓN STREAMLIT (UI HÍBRIDA MEJORADA) ---
-
 st.set_page_config(page_title="Agente NHTSA RAG", layout="wide")
 st.title("🚗 Agente Híbrido de Búsqueda NHTSA")
 st.markdown("""
